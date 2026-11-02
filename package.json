@@ -1,0 +1,14 @@
+{
+  "name": "esports-fantasy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --no-warnings server/index.js",
+    "reset": "rm -f data.db && node --no-warnings server/index.js"
+  },
+  "engines": { "node": ">=22.5" },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
