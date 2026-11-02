@@ -1,7 +1,7 @@
 // Browser database for the GitHub Pages build: SQLite compiled to WebAssembly (sql.js),
 // saved to localStorage. It mirrors the bits of node:sqlite that the server code uses,
 // so routes.js, seed.js and sim.js run unchanged.
-import { SCHEMA } from './schema.js';
+import { migrate } from './schema.js';
 
 export const STORAGE_KEY = 'fragline.db';
 const base = new URL('../vendor/', import.meta.url).href;
@@ -27,7 +27,6 @@ function load() {
 }
 
 const raw = load();
-raw.exec(SCHEMA);
 
 const prepare = (sql) => ({
   all(...args) {
@@ -48,6 +47,7 @@ const prepare = (sql) => ({
 });
 
 export const db = { prepare, exec: (sql) => raw.exec(sql) };
+migrate(db); // wipes demo data saved by an older version of the app
 
 export function tx(fn) {
   raw.exec('BEGIN');

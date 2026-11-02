@@ -1,89 +1,78 @@
-// Match simulator: a stand-in for a real esports stats feed.
-// It "plays" every match in the current week, writes box scores and fantasy points,
-// and closes the week. Replace with a provider import when you have real data.
+// Plays a game's current week with the game's simulator, scores it, closes the week,
+// and re-prices players. Replace with a real stats import when you have a data feed.
 import { db, tx } from './db.js';
-import { playerPoints, teamPoints } from './scoring.js';
+import { getGame } from './games/index.js';
+import { scoreStats } from './games/tactical-shooter.js';
 
-const randInt = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
-const gauss = () => {
-  let u = 0, v = 0;
-  while (!u) u = Math.random();
-  while (!v) v = Math.random();
-  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-};
+const round100 = (v) => Math.round(v / 100) * 100;
 
-// Split `total` events across players proportional to weights.
-function distribute(total, weights) {
-  const out = weights.map(() => 0);
-  const sum = weights.reduce((a, b) => a + b, 0);
-  for (let i = 0; i < total; i++) {
-    let r = Math.random() * sum;
-    let k = 0;
-    while (r > weights[k]) r -= weights[k++];
-    out[k]++;
+export function currentWeek(gameId) {
+  return db.prepare("SELECT * FROM weeks WHERE game = ? AND status = 'open' ORDER BY number LIMIT 1").get(gameId) ?? null;
+}
+
+/** Move each player's salary part of the way toward what their scoring so far is worth. */
+function reprice(gameId) {
+  const rows = db.prepare(`
+    SELECT p.id, p.salary, AVG(ps.points) AS fppg
+    FROM players p JOIN player_stats ps ON ps.player_id = p.id
+    WHERE p.game = ? GROUP BY p.id`).all(gameId);
+  if (!rows.length) return;
+  const meanPts = rows.reduce((s, r) => s + r.fppg, 0) / rows.length;
+  const meanSal = rows.reduce((s, r) => s + r.salary, 0) / rows.length;
+  const upd = db.prepare('UPDATE players SET salary = ? WHERE id = ?');
+  for (const r of rows) {
+    const target = meanSal * (r.fppg / meanPts);
+    upd.run(Math.max(3500, Math.min(11500, round100(r.salary * 0.65 + target * 0.35))), r.id);
   }
-  return out;
 }
 
-const KILL_SHARE = { TOP: 0.9, JNG: 1.0, MID: 1.3, ADC: 1.5, SUP: 0.25 };
-const DEATH_SHARE = { TOP: 1.0, JNG: 1.0, MID: 1.0, ADC: 1.0, SUP: 1.2 };
-const ASSIST_SHARE = { TOP: 0.8, JNG: 1.3, MID: 1.0, ADC: 0.9, SUP: 1.6 };
-const CS_PER_MIN = { TOP: 7.6, JNG: 5.6, MID: 8.1, ADC: 8.8, SUP: 1.3 };
-
-export function currentWeek() {
-  return db.prepare("SELECT id FROM weeks WHERE status = 'open' ORDER BY id LIMIT 1").get()?.id ?? null;
+/** Managers who didn't touch their lineup this week keep last week's, as the lineup locks. */
+function carryOverLineups(gameId, week) {
+  const missing = db.prepare(`
+    SELECT lm.league_id, lm.user_id FROM league_members lm JOIN leagues l ON l.id = lm.league_id
+    WHERE l.game = ? AND NOT EXISTS (
+      SELECT 1 FROM lineups x WHERE x.league_id = lm.league_id AND x.user_id = lm.user_id AND x.week_id = ?)`).all(gameId, week.id);
+  const prevWeek = db.prepare(`
+    SELECT MAX(w.number) AS n FROM lineups l JOIN weeks w ON w.id = l.week_id
+    WHERE l.league_id = ? AND l.user_id = ? AND w.number < ?`);
+  const copy = db.prepare(`
+    INSERT INTO lineups (league_id, user_id, week_id, slot, player_id, team_id)
+    SELECT l.league_id, l.user_id, ?, l.slot, l.player_id, l.team_id FROM lineups l JOIN weeks w ON w.id = l.week_id
+    WHERE l.league_id = ? AND l.user_id = ? AND w.game = ? AND w.number = ?`);
+  for (const m of missing) {
+    const n = prevWeek.get(m.league_id, m.user_id, week.number).n;
+    if (n) copy.run(week.id, m.league_id, m.user_id, gameId, n);
+  }
 }
 
-export function simulateCurrentWeek() {
-  const week = currentWeek();
-  if (week == null) throw new Error('Season is over — no open weeks left.');
-
-  const matches = db.prepare('SELECT * FROM matches WHERE week = ?').all(week);
-  const teamById = (id) => db.prepare('SELECT * FROM teams WHERE id = ?').get(id);
-  const rosterOf = (id) => db.prepare('SELECT * FROM players WHERE team_id = ? ORDER BY id').all(id);
-
-  const updMatch = db.prepare('UPDATE matches SET winner_id = ?, duration_min = ?, kills_a = ?, kills_b = ? WHERE id = ?');
-  const insPS = db.prepare('INSERT INTO player_stats (match_id, player_id, kills, deaths, assists, cs, points) VALUES (?, ?, ?, ?, ?, ?, ?)');
-  const insTS = db.prepare('INSERT INTO team_stats (match_id, team_id, won, towers, dragons, barons, first_blood, points) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+export function simulateCurrentWeek(gameId) {
+  const game = getGame(gameId);
+  const week = currentWeek(gameId);
+  if (!week) {
+    const err = new Error(`The ${game.name} season is over — no open weeks left.`);
+    err.status = 400;
+    throw err;
+  }
+  const team = (id) => db.prepare('SELECT * FROM teams WHERE id = ?').get(id);
+  const roster = (id) => db.prepare('SELECT * FROM players WHERE team_id = ? ORDER BY id').all(id);
+  const updMatch = db.prepare('UPDATE matches SET winner_id = ?, maps_a = ?, maps_b = ?, detail = ? WHERE id = ?');
+  const insPS = db.prepare('INSERT INTO player_stats (match_id, player_id, stats, points) VALUES (?, ?, ?, ?)');
+  const insTS = db.prepare('INSERT INTO team_stats (match_id, team_id, stats, points) VALUES (?, ?, ?, ?)');
 
   tx(() => {
-    for (const m of matches) {
-      const A = teamById(m.team_a), B = teamById(m.team_b);
-      const ra = rosterOf(A.id), rb = rosterOf(B.id);
-      const strength = (t, r) => t.rating * 0.5 + (r.reduce((s, p) => s + p.rating, 0) / r.length) * 0.5;
-      const pA = 1 / (1 + Math.pow(10, (strength(B, rb) - strength(A, ra)) / 18));
-      const aWins = Math.random() < pA;
-      const duration = Math.round(Math.max(22, Math.min(45, 32 + gauss() * 5)));
-
-      const killsW = randInt(14, 28), killsL = randInt(4, Math.max(5, killsW - 4));
-      const [kA, kB] = aWins ? [killsW, killsL] : [killsL, killsW];
-      const firstBloodA = Math.random() < (aWins ? 0.62 : 0.38);
-
-      const side = (team, roster, won, kills, enemyKills, firstBlood) => {
-        const kw = roster.map((p) => KILL_SHARE[p.role] * (p.rating / 75) ** 2);
-        const dw = roster.map((p) => DEATH_SHARE[p.role] * (75 / p.rating));
-        const aw = roster.map((p) => ASSIST_SHARE[p.role]);
-        const K = distribute(kills, kw);
-        const D = distribute(enemyKills, dw);
-        const A = distribute(Math.round(kills * (1.6 + Math.random() * 0.6)), aw);
-        roster.forEach((p, i) => {
-          const cs = Math.max(0, Math.round(CS_PER_MIN[p.role] * duration * (0.85 + (p.rating - 50) / 300 + gauss() * 0.06)));
-          const pts = playerPoints({ kills: K[i], deaths: D[i], assists: A[i], cs, won });
-          insPS.run(m.id, p.id, K[i], D[i], A[i], cs, pts);
-        });
-        const towers = won ? randInt(7, 11) : randInt(0, 5);
-        const dragons = won ? randInt(2, 4) : randInt(0, 2);
-        const barons = won ? randInt(1, 2) : randInt(0, 1) * (Math.random() < 0.3 ? 1 : 0);
-        const tp = teamPoints({ won, towers, dragons, barons, firstBlood, duration });
-        insTS.run(m.id, team.id, won ? 1 : 0, towers, dragons, barons, firstBlood ? 1 : 0, tp);
-      };
-
-      side(A, ra, aWins, kA, kB, firstBloodA);
-      side(B, rb, !aWins, kB, kA, !firstBloodA);
-      updMatch.run(aWins ? A.id : B.id, duration, kA, kB, m.id);
+    carryOverLineups(gameId, week);
+    for (const m of db.prepare('SELECT * FROM matches WHERE week_id = ?').all(week.id)) {
+      const A = team(m.team_a), B = team(m.team_b);
+      const r = game.simulateSeries(A, roster(A.id), B, roster(B.id));
+      for (const [pid, stats] of r.players) {
+        insPS.run(m.id, pid, JSON.stringify(stats), scoreStats(stats, game.playerRules, game.playerBonuses));
+      }
+      insTS.run(m.id, A.id, JSON.stringify(r.teams.a), scoreStats(r.teams.a, game.teamRules, game.teamBonuses));
+      insTS.run(m.id, B.id, JSON.stringify(r.teams.b), scoreStats(r.teams.b, game.teamRules, game.teamBonuses));
+      updMatch.run(r.winnerId, r.mapsA, r.mapsB, JSON.stringify({ maps: r.maps }), m.id);
     }
-    db.prepare("UPDATE weeks SET status = 'complete' WHERE id = ?").run(week);
+    db.prepare("UPDATE weeks SET status = 'complete' WHERE id = ?").run(week.id);
+    reprice(gameId);
   });
-
-  return week;
+  return week.number;
 }

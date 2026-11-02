@@ -3,12 +3,12 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SCHEMA } from './schema.js';
+import { migrate } from './schema.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const db = new DatabaseSync(process.env.DB_PATH || path.join(root, 'data.db'));
 db.exec('PRAGMA journal_mode = WAL;');
-db.exec(SCHEMA);
+migrate(db);
 
 /** Run fn inside a transaction. */
 export function tx(fn) {

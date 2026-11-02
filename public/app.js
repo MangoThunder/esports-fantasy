@@ -2,11 +2,13 @@
 import { request, MODE, resetData } from './transport.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
+const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 const app = $('#app');
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (n) => '$' + Number(n).toLocaleString();
+const money = (n) => '$' + Math.round(Number(n)).toLocaleString();
 const fmt = (n, d = 1) => Number(n).toFixed(d);
+const signed = (n) => (n > 0 ? '+' : '') + n;
 
 async function api(path, opts = {}) {
   const { status, data } = await request(opts.method || 'GET', path, opts.body);
@@ -30,44 +32,69 @@ $('#modal').addEventListener('click', (e) => {
   if (e.target.id === 'modal' || e.target.classList.contains('modal-x')) $('#modal').classList.add('hidden');
 });
 
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+};
+
 // ---------- global state ----------
-const state = { me: null, rules: null, players: null, teams: null };
-async function refreshMe() {
-  state.me = await api('/me');
-  renderHeader();
+const state = { me: null, games: [], game: store.get('fragline.game'), pools: {} };
+const gameById = (id) => state.games.find((g) => g.id === id);
+const currentGame = () => gameById(state.game) || state.games[0];
+function setGame(id) { state.game = id; store.set('fragline.game', id); }
+
+async function refreshMe() { state.me = await api('/me'); }
+async function refreshGames() { state.games = await api('/games'); }
+async function loadPool(gameId, force = false) {
+  if (!state.pools[gameId] || force) {
+    const [players, teams] = await Promise.all([api(`/players?game=${gameId}`), api(`/teams?game=${gameId}`)]);
+    state.pools[gameId] = { players, teams };
+  }
+  return state.pools[gameId];
 }
-async function loadPool(force = false) {
-  if (!state.players || force) [state.players, state.teams] = await Promise.all([api('/players'), api('/teams')]);
+
+const gameBadge = (g) => `<span class="game-badge" style="--gc:${g.color}">${esc(g.short)}</span>`;
+const teamTag = (tag, color) => `<span class="tag" style="color:${color}">${esc(tag)}</span>`;
+
+/** Play the current week for a game (demo tool), then refresh. */
+async function playWeek(gameId, btn) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('/admin/simulate', { method: 'POST', body: { game: gameId } });
+    toast(`${gameById(gameId).name} week ${r.simulated} played. Scores are in!`);
+    await Promise.all([refreshGames(), loadPool(gameId, true)]);
+    route_();
+  } catch (err) { toast(err.message, true); if (btn) btn.disabled = false; }
+}
+const playButton = (g) => (state.me.allowSim && g.currentWeek
+  ? `<button class="small" data-play="${g.id}" title="Demo tool: simulates every series this week">▶ Play week ${g.currentWeek}</button>` : '');
+function wirePlayButtons() {
+  $$('[data-play]', app).forEach((b) => b.addEventListener('click', () => playWeek(b.dataset.play, b)));
+}
+
+/** Tabs for switching game on the Players / Schedule / Scoring pages. */
+function gameTabs() {
+  const g = currentGame();
+  return `<div class="game-tabs">${state.games.map((x) => `<button class="${x.id === g.id ? 'active' : ''}" data-game="${x.id}" style="--gc:${x.color}">${esc(x.name)}</button>`).join('')}</div>`;
+}
+function wireGameTabs() {
+  $$('[data-game]', app).forEach((b) => b.addEventListener('click', () => { setGame(b.dataset.game); route_(); }));
 }
 
 function renderHeader() {
-  const { user, currentWeek, totalWeeks, allowSim } = state.me;
-  const route = location.hash.split('/')[1] || '';
-  const link = (href, label, key) => `<a href="#/${href}" class="${route === key ? 'active' : ''}">${label}</a>`;
+  const { user } = state.me;
+  const route = location.hash.replace(/^#\/?/, '').split('/')[0];
+  const link = (href, label, keys) => `<a href="#/${href}" class="${keys.includes(route) ? 'active' : ''}">${label}</a>`;
   $('#nav').innerHTML = user
-    ? link('', 'Leagues', route === 'league' ? 'league' : '') + link('players', 'Players', 'players') +
-      link('schedule', 'Schedule', 'schedule') + link('rules', 'Scoring', 'rules')
-    : link('rules', 'Scoring', 'rules');
-  const weekLabel = currentWeek ? `Week ${currentWeek} of ${totalWeeks}` : 'Season complete';
+    ? link('', 'Leagues', ['', 'league']) + link('players', 'Players', ['players']) + link('schedule', 'Schedule', ['schedule']) + link('rules', 'Scoring', ['rules'])
+    : link('rules', 'Scoring', ['rules']);
   $('#session').innerHTML = user
-    ? `<span class="pill ${currentWeek ? 'live' : 'done'}">${weekLabel}</span>
-       ${allowSim && currentWeek ? '<button class="small" id="sim" title="Dev tool: plays every match this week">▶ Play week</button>' : ''}
-       <span class="muted">${esc(user.username)}</span>
-       <button class="small ghost" id="logout">Log out</button>`
+    ? `<span class="muted">${esc(user.username)}</span><button class="small ghost" id="logout">Log out</button>`
     : '';
   $('#logout')?.addEventListener('click', async () => {
     await api('/logout', { method: 'POST' });
     state.me.user = null; // update before navigating so no view renders as the old user
     if (location.hash.replace(/^#\/?/, '')) location.hash = '#/'; else route_();
-  });
-  $('#sim')?.addEventListener('click', async (e) => {
-    e.target.disabled = true;
-    try {
-      const r = await api('/admin/simulate', { method: 'POST' });
-      toast(`Week ${r.simulated} played. Scores are in!`);
-      await Promise.all([refreshMe(), loadPool(true)]);
-      route_();
-    } catch (err) { toast(err.message, true); e.target.disabled = false; }
   });
 }
 
@@ -77,7 +104,7 @@ function viewAuth() {
   app.innerHTML = `
     <div class="auth panel">
       <h1>Draft the pros.<br>Win the week.</h1>
-      <p class="muted">Fantasy esports with salary-cap lineups. Pick five players and a team, beat your friends.</p>
+      <p class="muted">Fantasy esports for ${state.games.map((g) => esc(g.name)).join(' and ')}, with real pro rosters and salary-cap lineups. Pick a captain, four players and a team, then beat your friends.</p>
       <div class="tabs"><button data-m="login" class="active">Log in</button><button data-m="register">Sign up</button></div>
       <form>
         <div><label>Username</label><input name="username" autocomplete="username" required></div>
@@ -87,16 +114,15 @@ function viewAuth() {
       </form>
     </div>`;
   const form = $('form', app);
-  app.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => {
+  $$('.tabs button', app).forEach((b) => b.addEventListener('click', () => {
     mode = b.dataset.m;
-    app.querySelectorAll('.tabs button').forEach((x) => x.classList.toggle('active', x === b));
+    $$('.tabs button', app).forEach((x) => x.classList.toggle('active', x === b));
     $('button.primary', form).textContent = mode === 'login' ? 'Log in' : 'Create account';
   }));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const body = Object.fromEntries(new FormData(form));
     try {
-      await api('/' + mode, { method: 'POST', body });
+      await api('/' + mode, { method: 'POST', body: Object.fromEntries(new FormData(form)) });
       await refreshMe();
       route_();
     } catch (err) { $('.error', form).textContent = err.message; }
@@ -105,27 +131,33 @@ function viewAuth() {
 
 async function viewHome() {
   const leagues = await api('/leagues');
-  const { currentWeek, totalWeeks } = state.me;
   app.innerHTML = `
     <div class="stack">
       <div class="panel hero">
-        <h1>${currentWeek ? `Week ${currentWeek} lineups are open` : 'The season is over'}</h1>
-        <p>${currentWeek
-          ? `Set a lineup in each of your leagues before the matches are played. You get ${money(state.rules.SALARY_CAP)} to spend on one player per role, a flex, and a team.`
-          : `All ${totalWeeks} weeks are done. Check your league standings to see who took the crown.`}</p>
+        <h1>Fantasy esports, every week</h1>
+        <p>Make a league for ${state.games.map((g) => esc(g.name)).join(' or ')} and invite your friends. Each week you get a salary cap to pick a captain, four pros and a team, and they score points from their series.</p>
+        <div class="game-cards">${state.games.map((g) => `
+          <div class="game-card" style="--gc:${g.color}">
+            <div class="row spread">${gameBadge(g)}<span class="pill ${g.currentWeek ? 'live' : 'done'}">${g.currentWeek ? `Week ${g.currentWeek} of ${g.totalWeeks}` : 'Season complete'}</span></div>
+            <b>${esc(g.name)}</b>
+            <small class="muted">Rosters as of ${esc(g.asOf)}</small>
+          </div>`).join('')}</div>
       </div>
       <div class="grid grid-2">
         <div class="panel">
           <h2>Your leagues</h2>
-          ${leagues.length ? `<div class="grid">${leagues.map((l) => `
-            <a class="league-card" href="#/league/${l.id}">
-              <div class="row spread"><b>${esc(l.name)}</b><span class="muted">${l.members} member${l.members === 1 ? '' : 's'}</span></div>
-              <small class="muted">Invite code <span class="mono">${l.invite_code}</span></small>
-            </a>`).join('')}</div>` : '<p class="muted">You aren\'t in any leagues yet. Create one or join with a code.</p>'}
+          ${leagues.length ? `<div class="grid">${leagues.map((l) => {
+            const g = gameById(l.game);
+            return `<a class="league-card" href="#/league/${l.id}">
+              <div class="row spread"><span class="row" style="gap:8px">${gameBadge(g)}<b>${esc(l.name)}</b></span><span class="muted">${l.members} member${l.members === 1 ? '' : 's'}</span></div>
+              <small class="muted">Invite code <span class="mono">${l.invite_code}</span> · ${g.currentWeek ? `week ${g.currentWeek} lineups open` : 'season complete'}</small>
+            </a>`;
+          }).join('')}</div>` : '<p class="muted">You aren\'t in any leagues yet. Create one or join with a code.</p>'}
         </div>
         <div class="panel stack">
           <form id="create"><h2>Create a league</h2>
-            <div class="row"><input name="name" placeholder="League name" required maxlength="40" style="flex:1"><button class="primary">Create</button></div>
+            <div class="seg">${state.games.map((g, i) => `<label style="--gc:${g.color}"><input type="radio" name="game" value="${g.id}" ${(g.id === currentGame().id || (!currentGame() && !i)) ? 'checked' : ''}><span>${esc(g.name)}</span></label>`).join('')}</div>
+            <div class="row" style="margin-top:10px"><input name="name" placeholder="League name" required maxlength="40" style="flex:1"><button class="primary">Create</button></div>
           </form>
           <form id="join"><h2>Join a league</h2>
             <div class="row"><input name="code" placeholder="Invite code" required maxlength="6" class="mono" style="flex:1;text-transform:uppercase"><button>Join</button></div>
@@ -135,7 +167,8 @@ async function viewHome() {
     </div>`;
   $('#create').addEventListener('submit', async (e) => {
     e.preventDefault();
-    try { const r = await api('/leagues', { method: 'POST', body: Object.fromEntries(new FormData(e.target)) }); location.hash = `#/league/${r.id}`; }
+    const body = Object.fromEntries(new FormData(e.target));
+    try { const r = await api('/leagues', { method: 'POST', body }); setGame(body.game); location.hash = `#/league/${r.id}`; }
     catch (err) { toast(err.message, true); }
   });
   $('#join').addEventListener('submit', async (e) => {
@@ -147,15 +180,21 @@ async function viewHome() {
 
 async function viewLeague(id) {
   const L = await api(`/leagues/${id}`);
+  const g = gameById(L.game);
+  setGame(g.id);
   const me = state.me.user.id;
   const weeks = L.completeWeeks;
   app.innerHTML = `
     <div class="stack">
       <div class="row spread">
-        <div><h1>${esc(L.name)}</h1>
+        <div>
+          <div class="row" style="gap:8px">${gameBadge(g)}<span class="muted">${L.currentWeek ? `Week ${L.currentWeek} of ${L.totalWeeks}` : 'Season complete'}</span></div>
+          <h1 style="margin-top:6px">${esc(L.name)}</h1>
           <span class="muted">Invite friends with code <b class="mono" style="color:var(--text)">${L.invite_code}</b></span>
-          <button class="small ghost" id="copy">Copy</button></div>
-        ${L.currentWeek ? `<a href="#/league/${L.id}/lineup"><button class="primary">Set week ${L.currentWeek} lineup</button></a>` : ''}
+          <button class="small ghost" id="copy">Copy</button>
+        </div>
+        <div class="row">${playButton(g)}
+          ${L.currentWeek ? `<a href="#/league/${L.id}/lineup"><button class="primary">Set week ${L.currentWeek} lineup</button></a>` : ''}</div>
       </div>
       <div class="panel">
         <h2>Standings</h2>
@@ -170,56 +209,67 @@ async function viewLeague(id) {
               ${L.currentWeek ? `<td>${s.lineupSet ? '<span class="pill live">Set</span>' : '<span class="pill">Not set</span>'}</td>` : ''}
             </tr>`).join('')}</tbody>
         </table></div>
-        ${weeks.length ? '<p class="muted" style="margin-bottom:0">Click a weekly score to see that lineup.</p>' : '<p class="muted" style="margin-bottom:0">No weeks have been played yet.</p>'}
+        <p class="muted" style="margin-bottom:0">${weeks.length ? 'Click a weekly score to see that lineup. ' : 'No weeks have been played yet. '}If you don't change your lineup, last week's carries over.</p>
       </div>
     </div>`;
+  wirePlayButtons();
   $('#copy').addEventListener('click', () => navigator.clipboard?.writeText(L.invite_code).then(() => toast('Invite code copied')));
-  app.querySelectorAll('td.clickable').forEach((td) => td.addEventListener('click', async () => {
-    await loadPool();
+  $$('td.clickable', app).forEach((td) => td.addEventListener('click', async () => {
+    const pool = await loadPool(g.id);
     const lu = await api(`/leagues/${id}/lineup?week=${td.dataset.week}&user=${td.dataset.user}`);
     const who = L.standings.find((s) => s.id === Number(td.dataset.user)).username;
-    modal(`<h2>${esc(who)} · Week ${lu.week}</h2>${lineupTable(lu.slots)}`);
+    modal(`<h2>${esc(who)} · Week ${lu.week}</h2>${lineupTable(g, pool, lu.slots)}`);
   }));
 }
 
-function lineupTable(slots) {
-  const rows = state.rules.SLOTS.map((slot) => {
-    const s = slots[slot];
-    if (!s) return `<tr><td><span class="role ${slot}">${slot}</span></td><td class="muted">Empty</td><td></td><td class="num">0.0</td></tr>`;
-    const p = s.player_id ? state.players.find((x) => x.id === s.player_id) : null;
-    const t = s.team_id ? state.teams.find((x) => x.id === s.team_id) : null;
-    return `<tr><td><span class="role ${slot}">${slot}</span></td><td><b>${esc(p ? p.handle : t.name)}</b></td>
-      <td class="tag" style="color:${p ? p.team_color : t.color}">${p ? p.team_tag : t.tag}</td><td class="num">${fmt(s.points ?? 0)}</td></tr>`;
+function lineupTable(g, pool, slots) {
+  const rows = g.slots.map((slot) => {
+    const s = slots[slot.id];
+    const label = `<span class="role ${slot.id === 'CPT' ? 'CPT' : slot.kind === 'team' ? 'TEAM' : ''}">${slot.label}</span>`;
+    if (!s) return `<tr><td>${label}</td><td class="muted">Empty</td><td></td><td class="num">0.0</td></tr>`;
+    const p = s.player_id ? pool.players.find((x) => x.id === s.player_id) : null;
+    const t = s.team_id ? pool.teams.find((x) => x.id === s.team_id) : null;
+    return `<tr><td>${label}</td><td><b>${esc(p ? p.handle : t.name)}</b></td>
+      <td>${p ? teamTag(p.team_tag, p.team_color) : teamTag(t.tag, t.color)}</td><td class="num">${fmt(s.points ?? 0)}</td></tr>`;
   }).join('');
   const total = Object.values(slots).reduce((a, s) => a + (s.points || 0), 0);
   return `<table><tbody>${rows}</tbody><tfoot><tr><td colspan="3"><b>Total</b></td><td class="num"><b>${fmt(total)}</b></td></tr></tfoot></table>`;
 }
 
 async function viewLineup(id) {
-  await loadPool();
   const [L, lu] = await Promise.all([api(`/leagues/${id}`), api(`/leagues/${id}/lineup`)]);
   if (!lu.editable) { location.hash = `#/league/${id}`; return; }
-  const { SLOTS, SALARY_CAP } = state.rules;
-  const picks = {}; // slot -> player or team object
+  const g = gameById(L.game);
+  const pool = await loadPool(g.id);
+  const playerSlots = g.slots.filter((s) => s.kind === 'player');
+  const teamSlot = g.slots.find((s) => s.kind === 'team');
+  const mult = (slotId) => g.slots.find((s) => s.id === slotId)?.multiplier ?? 1;
+
+  const picks = {}; // slotId -> player or team
   for (const [slot, s] of Object.entries(lu.slots)) {
-    picks[slot] = s.player_id ? state.players.find((p) => p.id === s.player_id) : state.teams.find((t) => t.id === s.team_id);
+    picks[slot] = s.player_id ? pool.players.find((p) => p.id === s.player_id) : pool.teams.find((t) => t.id === s.team_id);
+    if (!picks[slot]) delete picks[slot];
   }
-  let filter = 'ALL', search = '', sortKey = 'salary', sortDir = -1, target = null;
+  let view = 'players', search = '', sortKey = 'salary', sortDir = -1, target = null;
   let dirty = !!lu.prefilledFrom;
 
-  const spent = () => Object.values(picks).reduce((a, x) => a + (x?.salary || 0), 0);
-  const pickedPlayerIds = () => new Set(Object.entries(picks).filter(([s, x]) => s !== 'TEAM' && x).map(([, x]) => x.id));
-  const slotFor = (p) => {
-    if (target && (target === 'FLEX' || target === p.role)) return target;
-    if (!picks[p.role]) return p.role;
-    if (!picks.FLEX) return 'FLEX';
-    return p.role; // replace existing pick at that role
+  const cost = (slotId, x) => (x ? x.salary * mult(slotId) : 0);
+  const spent = () => Object.entries(picks).reduce((a, [s, x]) => a + cost(s, x), 0);
+  const pickedIds = () => new Set(playerSlots.map((s) => picks[s.id]?.id).filter(Boolean));
+  const fromTeam = (teamId, exceptSlot) => playerSlots.filter((s) => s.id !== exceptSlot && picks[s.id]?.team_id === teamId).length;
+  // Where a newly added player goes: the selected slot, else the first empty one (captain last).
+  const slotFor = () => {
+    if (target && playerSlots.some((s) => s.id === target)) return target;
+    const open = playerSlots.filter((s) => !picks[s.id]);
+    return (open.find((s) => !s.multiplier) || open[0])?.id ?? null;
   };
 
   app.innerHTML = `
     <div class="row spread" style="margin-bottom:16px">
-      <div><a href="#/league/${id}">← ${esc(L.name)}</a><h1 style="margin-top:6px">Week ${lu.week} lineup</h1></div>
-      ${lu.prefilledFrom ? `<span class="pill">Copied from week ${lu.prefilledFrom} — save to keep it</span>` : ''}
+      <div><a href="#/league/${id}">← ${esc(L.name)}</a>
+        <h1 style="margin-top:6px">Week ${lu.week} lineup</h1>
+        <div class="row" style="gap:8px">${gameBadge(g)}<span class="muted">Max ${g.maxPerTeam} players from one team · Captain scores 1.5×</span></div></div>
+      ${lu.prefilledFrom ? `<span class="pill">Copied from week ${lu.prefilledFrom}</span>` : ''}
     </div>
     <div class="builder">
       <div class="panel lineup-panel">
@@ -239,88 +289,106 @@ async function viewLineup(id) {
     </div>`;
 
   function renderSlots() {
-    const used = spent(), left = SALARY_CAP - used;
-    const empty = SLOTS.filter((s) => !picks[s]).length;
-    $('#cap').innerHTML = `${money(used)} / ${money(SALARY_CAP)}`;
-    $('#capbar').classList.toggle('over', used > SALARY_CAP);
-    $('#capbar > div').style.width = Math.min(100, (used / SALARY_CAP) * 100) + '%';
-    $('#avg').innerHTML = used > SALARY_CAP
+    const used = spent(), left = g.salaryCap - used;
+    const empty = g.slots.filter((s) => !picks[s.id]).length;
+    $('#cap').innerHTML = `${money(used)} / ${money(g.salaryCap)}`;
+    $('#capbar').classList.toggle('over', used > g.salaryCap);
+    $('#capbar > div').style.width = Math.min(100, (used / g.salaryCap) * 100) + '%';
+    $('#avg').innerHTML = used > g.salaryCap
       ? `<span style="color:var(--bad)">${money(-left)} over the cap</span>`
       : empty ? `${money(left)} left · ${money(Math.floor(left / empty))} per open slot` : `${money(left)} left · lineup full`;
-    $('#slots').innerHTML = SLOTS.map((slot) => {
-      const x = picks[slot];
-      const isTeam = slot === 'TEAM';
-      return `<div class="slot ${x ? 'filled' : ''} ${target === slot ? 'target' : ''}" data-slot="${slot}">
-        <span class="role ${slot}">${slot}</span>
+    $('#slots').innerHTML = g.slots.map((slot) => {
+      const x = picks[slot.id];
+      const isTeam = slot.kind === 'team';
+      const cls = slot.id === 'CPT' ? 'CPT' : isTeam ? 'TEAM' : '';
+      return `<div class="slot ${x ? 'filled' : ''} ${target === slot.id ? 'target' : ''} ${slot.multiplier ? 'captain' : ''}" data-slot="${slot.id}">
+        <span class="role ${cls}">${slot.id === 'CPT' ? 'CPT' : isTeam ? 'TEAM' : 'PLAYER'}</span>
         <div class="who">${x
-          ? `<b>${esc(isTeam ? x.name : x.handle)}</b><small><span class="tag" style="color:${isTeam ? x.color : x.team_color}">${isTeam ? x.tag : x.team_tag}</span> ${x.opponent ? 'vs ' + x.opponent : ''} · ${money(x.salary)}</small>`
-          : `<small>${slot === 'FLEX' ? 'Any player' : isTeam ? 'Pick a team' : 'Pick a ' + slot}</small>`}</div>
-        ${x ? `<button class="x" data-remove="${slot}" title="Remove">×</button>` : ''}
+          ? `<b>${esc(isTeam ? x.name : x.handle)}</b><small>${isTeam ? teamTag(x.tag, x.color) : teamTag(x.team_tag, x.team_color)} ${x.opponent ? 'vs ' + esc(x.opponent) : ''} · ${money(cost(slot.id, x))}</small>`
+          : `<small>${slot.hint ? esc(slot.label) + ': ' + esc(slot.hint) : isTeam ? 'Pick a team' : 'Pick a player'}</small>`}</div>
+        <span class="slot-actions">
+          ${x && !isTeam && !slot.multiplier && playerSlots.some((s) => s.multiplier) ? `<button class="x cpt" data-cpt="${slot.id}" title="Make captain">C</button>` : ''}
+          ${x ? `<button class="x" data-remove="${slot.id}" title="Remove">×</button>` : ''}
+        </span>
       </div>`;
     }).join('');
-    $('#slots').querySelectorAll('.slot').forEach((el) => el.addEventListener('click', (e) => {
-      if (e.target.dataset.remove) { delete picks[e.target.dataset.remove]; dirty = true; }
-      else {
+    $$('#slots .slot').forEach((el) => el.addEventListener('click', (e) => {
+      const { remove, cpt } = e.target.dataset;
+      if (remove) { delete picks[remove]; dirty = true; }
+      else if (cpt) {
+        const cap = playerSlots.find((s) => s.multiplier).id;
+        [picks[cap], picks[cpt]] = [picks[cpt], picks[cap]];
+        if (!picks[cpt]) delete picks[cpt];
+        dirty = true;
+      } else {
         const s = el.dataset.slot;
         target = target === s ? null : s;
-        filter = s === 'FLEX' ? 'ALL' : s;
+        view = s === teamSlot?.id ? 'teams' : 'players';
       }
       renderAll();
     }));
   }
 
   function renderPool() {
-    const chips = ['ALL', ...state.rules.ROLES, 'TEAM'];
-    $('#filters').innerHTML = chips.map((c) => `<button class="chip small ${filter === c ? 'active' : ''}" data-f="${c}">${c === 'ALL' ? 'All players' : c === 'TEAM' ? 'Teams' : c}</button>`).join('') +
-      `<input id="q" placeholder="Search player or team" value="${esc(search)}">`;
-    $('#filters').querySelectorAll('.chip').forEach((b) => b.addEventListener('click', () => { filter = b.dataset.f; target = filter === 'ALL' ? target : null; renderAll(); }));
+    $('#filters').innerHTML = `
+      <button class="chip small ${view === 'players' ? 'active' : ''}" data-v="players">Players</button>
+      <button class="chip small ${view === 'teams' ? 'active' : ''}" data-v="teams">Teams</button>
+      <input id="q" placeholder="Search player or team" value="${esc(search)}">`;
+    $$('#filters .chip').forEach((b) => b.addEventListener('click', () => { view = b.dataset.v; renderAll(); }));
     const q = $('#q');
     q.addEventListener('input', () => { search = q.value; renderTable(); });
     renderTable();
   }
 
   function renderTable() {
-    const left = SALARY_CAP - spent();
+    const left = g.salaryCap - spent();
     const s = search.toLowerCase();
     const th = (k, label, num = true) => `<th class="sort ${num ? 'num' : ''}" data-k="${k}">${label}${sortKey === k ? (sortDir < 0 ? ' ↓' : ' ↑') : ''}</th>`;
     const sorter = (a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir;
     let html;
-    if (filter === 'TEAM') {
-      const rows = state.teams.filter((t) => !s || t.name.toLowerCase().includes(s) || t.tag.toLowerCase().includes(s)).sort(sorter);
+    if (view === 'teams') {
+      const rows = pool.teams.filter((t) => !s || t.name.toLowerCase().includes(s) || t.tag.toLowerCase().includes(s)).sort(sorter);
       html = `<thead><tr><th>Team</th><th>Opp</th>${th('wins', 'W-L')}${th('avg_pts', 'FPPG')}${th('salary', 'Salary')}<th></th></tr></thead><tbody>${rows.map((t) => {
-        const picked = picks.TEAM?.id === t.id;
-        const cant = !picked && t.salary - (picks.TEAM?.salary || 0) > left;
-        return `<tr class="${picked ? 'picked' : ''} ${cant ? 'cant' : ''}"><td><span class="dot" style="background:${t.color}"></span> <b>${esc(t.name)}</b> <span class="tag muted">${t.tag}</span></td>
-          <td class="tag muted">${t.opponent || '—'}</td><td class="num">${t.wins}-${t.games - t.wins}</td><td class="num">${fmt(t.avg_pts)}</td><td class="num">${money(t.salary)}</td>
+        const picked = picks[teamSlot.id]?.id === t.id;
+        const cant = !picked && t.salary - (picks[teamSlot.id]?.salary || 0) > left;
+        return `<tr class="${picked ? 'picked' : ''} ${cant ? 'cant' : ''}"><td><span class="dot" style="background:${t.color}"></span> <b>${esc(t.name)}</b></td>
+          <td class="tag muted">${esc(t.opponent || '—')}</td><td class="num">${t.wins}-${t.games - t.wins}</td><td class="num">${fmt(t.avg_pts)}</td><td class="num">${money(t.salary)}</td>
           <td class="num"><button class="small add" data-team="${t.id}" ${picked ? 'disabled' : ''}>${picked ? 'Picked' : 'Add'}</button></td></tr>`;
       }).join('')}</tbody>`;
     } else {
-      const picked = pickedPlayerIds();
-      const rows = state.players
-        .filter((p) => filter === 'ALL' || p.role === filter)
+      const picked = pickedIds();
+      const dest = slotFor();
+      const rows = pool.players
         .filter((p) => !s || p.handle.toLowerCase().includes(s) || p.team_name.toLowerCase().includes(s) || p.team_tag.toLowerCase().includes(s))
         .sort(sorter);
-      html = `<thead><tr><th>Pos</th>${th('handle', 'Player', false)}<th>Team</th><th>Opp</th>${th('games', 'GP')}${th('avg_pts', 'FPPG')}${th('salary', 'Salary')}<th></th></tr></thead><tbody>${rows.map((p) => {
+      html = `<thead><tr>${th('handle', 'Player', false)}<th>Team</th><th>Opp</th>${th('games', 'GP')}${th('avg_pts', 'FPPG')}${th('salary', 'Salary')}<th></th></tr></thead><tbody>${rows.map((p) => {
         const isPicked = picked.has(p.id);
-        const replacing = picks[slotFor(p)];
-        const cant = !isPicked && p.salary - (replacing?.salary || 0) > left;
-        return `<tr class="${isPicked ? 'picked' : ''} ${cant ? 'cant' : ''}"><td><span class="role ${p.role}">${p.role}</span></td><td><b>${esc(p.handle)}</b></td>
-          <td class="tag" style="color:${p.team_color}">${p.team_tag}</td><td class="tag muted">${p.opponent || '—'}</td>
+        let why = '';
+        if (!isPicked) {
+          if (!dest) why = 'Lineup full';
+          else if (fromTeam(p.team_id, dest) >= g.maxPerTeam) why = `Max ${g.maxPerTeam} from ${p.team_tag}`;
+          else if (cost(dest, p) - cost(dest, picks[dest]) > left) why = 'Over cap';
+        }
+        return `<tr class="${isPicked ? 'picked' : ''} ${why ? 'cant' : ''}"><td><b>${esc(p.handle)}</b></td>
+          <td>${teamTag(p.team_tag, p.team_color)}</td><td class="tag muted">${esc(p.opponent || '—')}</td>
           <td class="num">${p.games}</td><td class="num">${fmt(p.avg_pts)}</td><td class="num">${money(p.salary)}</td>
-          <td class="num"><button class="small add" data-player="${p.id}" ${isPicked ? 'disabled' : ''}>${isPicked ? 'Picked' : 'Add'}</button></td></tr>`;
+          <td class="num"><button class="small add" data-player="${p.id}" ${isPicked || why ? 'disabled' : ''} title="${esc(why)}">${isPicked ? 'Picked' : why ? esc(why) : dest === 'CPT' ? 'Captain' : 'Add'}</button></td></tr>`;
       }).join('')}</tbody>`;
     }
     $('#pool').innerHTML = html;
-    $('#pool').querySelectorAll('th.sort').forEach((h) => h.addEventListener('click', () => {
+    $$('#pool th.sort').forEach((h) => h.addEventListener('click', () => {
       if (sortKey === h.dataset.k) sortDir *= -1; else { sortKey = h.dataset.k; sortDir = h.dataset.k === 'handle' ? 1 : -1; }
       renderTable();
     }));
-    $('#pool').querySelectorAll('button[data-player]').forEach((b) => b.addEventListener('click', () => {
-      const p = state.players.find((x) => x.id === Number(b.dataset.player));
-      picks[slotFor(p)] = p; target = null; dirty = true; renderAll();
+    $$('#pool button[data-player]').forEach((b) => b.addEventListener('click', () => {
+      const dest = slotFor();
+      if (!dest) return;
+      picks[dest] = pool.players.find((x) => x.id === Number(b.dataset.player));
+      target = null; dirty = true; renderAll();
     }));
-    $('#pool').querySelectorAll('button[data-team]').forEach((b) => b.addEventListener('click', () => {
-      picks.TEAM = state.teams.find((x) => x.id === Number(b.dataset.team)); target = null; dirty = true; renderAll();
+    $$('#pool button[data-team]').forEach((b) => b.addEventListener('click', () => {
+      picks[teamSlot.id] = pool.teams.find((x) => x.id === Number(b.dataset.team));
+      target = null; dirty = true; renderAll();
     }));
   }
 
@@ -333,28 +401,33 @@ async function viewLineup(id) {
     try {
       const r = await api(`/leagues/${id}/lineup`, { method: 'PUT', body: { slots } });
       dirty = false;
-      toast(r.filled < SLOTS.length ? `Saved — ${SLOTS.length - r.filled} slot(s) still empty` : 'Lineup saved. Good luck!');
+      toast(r.filled < g.slots.length ? `Saved. ${g.slots.length - r.filled} slot(s) still empty.` : 'Lineup saved. Good luck!');
     } catch (err) { toast(err.message, true); }
   });
   window.onbeforeunload = () => (dirty ? true : undefined);
 }
 
 async function viewPlayers() {
-  await loadPool();
-  let sortKey = 'avg_pts', dir = -1, role = 'ALL';
-  app.innerHTML = `<h1>Players</h1><div class="panel"><div class="filters" id="f"></div><div class="table-wrap"><table id="t"></table></div></div>`;
-  const cols = [['handle', 'Player'], ['games', 'GP'], ['avg_k', 'K'], ['avg_d', 'D'], ['avg_a', 'A'], ['avg_cs', 'CS'], ['avg_pts', 'FPPG'], ['total_pts', 'Total'], ['salary', 'Salary']];
+  const g = currentGame();
+  const pool = await loadPool(g.id);
+  let sortKey = 'avg_pts', dir = -1, team = 'ALL';
+  app.innerHTML = `<div class="row spread"><h1>Players</h1>${gameTabs()}</div>
+    <p class="muted">${esc(g.name)} rosters as of ${esc(g.asOf)}. Stats are averages per series. Salaries update after every week based on fantasy output.</p>
+    <div class="panel"><div class="filters" id="f"></div><div class="table-wrap"><table id="t"></table></div></div>`;
+  wireGameTabs();
+  const val = (p, k) => (k in p ? p[k] : p.avg[k] ?? 0);
   function render() {
-    $('#f').innerHTML = ['ALL', ...state.rules.ROLES].map((r) => `<button class="chip small ${role === r ? 'active' : ''}" data-r="${r}">${r === 'ALL' ? 'All' : r}</button>`).join('');
-    $('#f').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { role = b.dataset.r; render(); }));
-    const rows = state.players.filter((p) => role === 'ALL' || p.role === role)
-      .sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * dir);
-    $('#t').innerHTML = `<thead><tr><th>Pos</th>${cols.map(([k, l]) => `<th class="sort ${k === 'handle' ? '' : 'num'}" data-k="${k}">${l}${sortKey === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</th>`).join('')}<th>Team</th></tr></thead>
-      <tbody>${rows.map((p) => `<tr><td><span class="role ${p.role}">${p.role}</span></td><td><b>${esc(p.handle)}</b></td>
-        <td class="num">${p.games}</td><td class="num">${fmt(p.avg_k)}</td><td class="num">${fmt(p.avg_d)}</td><td class="num">${fmt(p.avg_a)}</td><td class="num">${fmt(p.avg_cs, 0)}</td>
-        <td class="num"><b>${fmt(p.avg_pts)}</b></td><td class="num">${fmt(p.total_pts)}</td><td class="num">${money(p.salary)}</td>
-        <td><span class="tag" style="color:${p.team_color}">${p.team_tag}</span> <span class="muted">${esc(p.team_name)}</span></td></tr>`).join('')}</tbody>`;
-    $('#t').querySelectorAll('th.sort').forEach((h) => h.addEventListener('click', () => {
+    $('#f').innerHTML = `<button class="chip small ${team === 'ALL' ? 'active' : ''}" data-t="ALL">All teams</button>` +
+      pool.teams.map((t) => `<button class="chip small ${team === t.id ? 'active' : ''}" data-t="${t.id}">${esc(t.tag)}</button>`).join('');
+    $$('#f button').forEach((b) => b.addEventListener('click', () => { team = b.dataset.t === 'ALL' ? 'ALL' : Number(b.dataset.t); render(); }));
+    const rows = pool.players.filter((p) => team === 'ALL' || p.team_id === team).sort((a, b) => (val(a, sortKey) > val(b, sortKey) ? 1 : -1) * dir);
+    const cols = [['games', 'GP'], ...g.statColumns.map((c) => [c.key, c.label]), ['avg_pts', 'FPPG'], ['total_pts', 'Total'], ['salary', 'Salary']];
+    const head = (k, l, num = true) => `<th class="sort ${num ? 'num' : ''}" data-k="${k}">${l}${sortKey === k ? (dir < 0 ? ' ↓' : ' ↑') : ''}</th>`;
+    $('#t').innerHTML = `<thead><tr>${head('handle', 'Player', false)}<th>Team</th>${cols.map(([k, l]) => head(k, l)).join('')}</tr></thead>
+      <tbody>${rows.map((p) => `<tr><td><b>${esc(p.handle)}</b></td><td>${teamTag(p.team_tag, p.team_color)} <span class="muted">${esc(p.team_name)}</span></td>
+        <td class="num">${p.games}</td>${g.statColumns.map((c) => `<td class="num">${fmt(p.avg[c.key] ?? 0)}</td>`).join('')}
+        <td class="num"><b>${fmt(p.avg_pts)}</b></td><td class="num">${fmt(p.total_pts)}</td><td class="num">${money(p.salary)}</td></tr>`).join('')}</tbody>`;
+    $$('#t th.sort').forEach((h) => h.addEventListener('click', () => {
       if (sortKey === h.dataset.k) dir *= -1; else { sortKey = h.dataset.k; dir = h.dataset.k === 'handle' ? 1 : -1; }
       render();
     }));
@@ -363,56 +436,63 @@ async function viewPlayers() {
 }
 
 async function viewSchedule() {
-  const weeks = await api('/schedule');
-  app.innerHTML = `<h1>Schedule & results</h1>` + weeks.map((w) => `
+  const g = currentGame();
+  const weeks = await api(`/schedule?game=${g.id}`);
+  app.innerHTML = `<div class="row spread"><h1>Schedule & results</h1><div class="row">${playButton(g)}${gameTabs()}</div></div>
+    <p class="muted">Each team plays one best-of-3 series per week.</p>` + weeks.map((w) => `
     <div class="week">
-      <div class="week-banner"><h2 style="margin:0">Week ${w.id}</h2>
-        <span class="pill ${w.status === 'complete' ? 'done' : w.id === state.me.currentWeek ? 'live' : ''}">${w.status === 'complete' ? 'Final' : w.id === state.me.currentWeek ? 'Lineups open' : 'Upcoming'}</span></div>
+      <div class="week-banner"><h2 style="margin:0">Week ${w.number}</h2>
+        <span class="pill ${w.status === 'complete' ? 'done' : w.number === g.currentWeek ? 'live' : ''}">${w.status === 'complete' ? 'Final' : w.number === g.currentWeek ? 'Lineups open' : 'Upcoming'}</span></div>
       <div class="matches" style="margin-top:10px">${w.matches.map((m) => {
         const played = m.winner_id != null;
         const cls = (tid) => (!played ? '' : m.winner_id === tid ? 'win' : 'lose');
         return `<div class="match ${played ? 'played' : ''}" data-id="${m.id}">
-          <div class="side ${cls(m.team_a)}"><span class="dot" style="background:${m.color_a}"></span><span class="tag">${m.tag_a}</span></div>
-          <div class="score">${played ? `${m.kills_a} – ${m.kills_b}` : 'vs'}</div>
-          <div class="side right ${cls(m.team_b)}"><span class="tag">${m.tag_b}</span><span class="dot" style="background:${m.color_b}"></span></div>
+          <div class="side ${cls(m.team_a)}"><span class="dot" style="background:${m.color_a}"></span><span class="tag">${esc(m.tag_a)}</span></div>
+          <div class="score">${played ? `${m.maps_a} – ${m.maps_b}` : 'vs'}</div>
+          <div class="side right ${cls(m.team_b)}"><span class="tag">${esc(m.tag_b)}</span><span class="dot" style="background:${m.color_b}"></span></div>
         </div>`;
       }).join('')}</div>
     </div>`).join('');
-  app.querySelectorAll('.match.played').forEach((el) => el.addEventListener('click', () => showMatch(el.dataset.id)));
+  wireGameTabs();
+  wirePlayButtons();
+  $$('.match.played', app).forEach((el) => el.addEventListener('click', () => showMatch(el.dataset.id)));
 }
 
 async function showMatch(id) {
   const m = await api(`/matches/${id}`);
-  const side = (teamId, name, tag, color) => {
+  const g = gameById(m.game);
+  const side = (teamId, name, color) => {
     const t = m.teams.find((x) => x.team_id === teamId);
     const ps = m.players.filter((p) => p.team_id === teamId);
-    return `<h3 style="margin-top:16px"><span class="dot" style="background:${color}"></span> ${esc(name)} ${t.won ? '<span class="pill live">WIN</span>' : ''}</h3>
-      <table><thead><tr><th>Pos</th><th>Player</th><th class="num">K</th><th class="num">D</th><th class="num">A</th><th class="num">CS</th><th class="num">FP</th></tr></thead>
-      <tbody>${ps.map((p) => `<tr><td><span class="role ${p.role}">${p.role}</span></td><td>${esc(p.handle)}</td><td class="num">${p.kills}</td><td class="num">${p.deaths}</td><td class="num">${p.assists}</td><td class="num">${p.cs}</td><td class="num"><b>${fmt(p.points)}</b></td></tr>`).join('')}
-      <tr><td><span class="role TEAM">TEAM</span></td><td class="muted">${t.towers} towers · ${t.dragons} drakes · ${t.barons} barons${t.first_blood ? ' · first blood' : ''}</td><td colspan="4"></td><td class="num"><b>${fmt(t.points)}</b></td></tr></tbody></table>`;
+    return `<h3 style="margin-top:16px"><span class="dot" style="background:${color}"></span> ${esc(name)} ${t.stats.series_won ? '<span class="pill live">WIN</span>' : ''}</h3>
+      <div class="table-wrap"><table><thead><tr><th>Player</th>${g.statColumns.map((c) => `<th class="num">${c.label}</th>`).join('')}<th class="num">FP</th></tr></thead>
+      <tbody>${ps.map((p) => `<tr><td>${esc(p.handle)}</td>${g.statColumns.map((c) => `<td class="num">${p.stats[c.key] ?? 0}</td>`).join('')}<td class="num"><b>${fmt(p.points)}</b></td></tr>`).join('')}
+      <tr><td><span class="role TEAM">TEAM</span> <span class="muted">${t.stats.maps_won} maps · ${signed(t.stats.round_diff)} rounds</span></td><td colspan="${g.statColumns.length}"></td><td class="num"><b>${fmt(t.points)}</b></td></tr></tbody></table></div>`;
   };
-  modal(`<h2>${esc(m.name_a)} vs ${esc(m.name_b)}</h2><p class="muted">Week ${m.week} · ${m.duration_min} min · ${m.kills_a}–${m.kills_b} kills</p>
-    ${side(m.team_a, m.name_a, m.tag_a, m.color_a)}${side(m.team_b, m.name_b, m.tag_b, m.color_b)}`);
+  const maps = m.detail.maps.map((x, i) => `Map ${i + 1}: <b>${x.a}–${x.b}</b>`).join(' · ');
+  modal(`<div class="row" style="gap:8px">${gameBadge(g)}<span class="muted">Week ${m.week} · Best of 3</span></div>
+    <h2 style="margin-top:8px">${esc(m.name_a)} ${m.maps_a}–${m.maps_b} ${esc(m.name_b)}</h2><p class="muted">${maps}</p>
+    ${side(m.team_a, m.name_a, m.color_a)}${side(m.team_b, m.name_b, m.color_b)}`);
 }
 
 function viewRules() {
-  const { PLAYER_RULES: P, TEAM_RULES: T, SALARY_CAP, SLOTS } = state.rules;
-  const sign = (n) => (n > 0 ? '+' : '') + n;
-  app.innerHTML = `<h1>How it works</h1>
+  const g = currentGame();
+  const dl = (rules, bonuses = []) => `<dl>${rules.map((r) => `<dt>${esc(r.label)}</dt><dd>${signed(r.pts)}</dd>`).join('')}
+    ${bonuses.map((b) => `<dt>${esc(b.label)}</dt><dd>${signed(b.pts)}</dd>`).join('')}</dl>`;
+  const source = /^https?:/.test(g.source) ? `<a href="${esc(g.source)}" target="_blank" rel="noopener">source</a>` : esc(g.source);
+  app.innerHTML = `<div class="row spread"><h1>How it works</h1>${gameTabs()}</div>
     <div class="stack">
       <div class="panel"><h2>Lineups</h2>
-        <p>Each week, in each league, pick <b>${SLOTS.length} slots</b>: ${SLOTS.map((s) => `<span class="role ${s}">${s}</span>`).join(' ')} — one player per role, a FLEX that takes any player, and one team.
-        Your lineup must cost no more than <b>${money(SALARY_CAP)}</b>. Anyone can pick any player, so there's no draft. Lineups lock when the week's matches are played, and you score points from what happens in those matches.</p>
-        <p class="muted" style="margin-bottom:0">Whoever has the most points across the season wins the league. "Week wins" counts how many weeks you posted the top score.</p></div>
+        <p>Each week, in each league, pick ${g.slots.map((s) => `<b>${esc(s.label)}</b>`).join(', ')} under a <b>${money(g.salaryCap)}</b> salary cap.
+        Your <b>Captain</b> scores 1.5× points and costs 1.5× salary. You can pick at most ${g.maxPerTeam} players from one team. Any number of managers can pick the same player, so there's no draft.</p>
+        <p>Lineups lock when the week's series are played. If you don't change yours, last week's lineup carries over. Salaries go up or down after each week depending on how players score.</p>
+        <p class="muted" style="margin-bottom:0">The highest season total wins the league. ${esc(g.name)} rosters are as of ${esc(g.asOf)} (${source}). Until a live stats feed is connected, match results are simulated from team strength.</p></div>
       <div class="rules">
-        <div class="panel"><h2>Players</h2><dl>
-          <dt>Kill</dt><dd>${sign(P.kill)}</dd><dt>Death</dt><dd>${sign(P.death)}</dd><dt>Assist</dt><dd>${sign(P.assist)}</dd>
-          <dt>Every ${P.csPerPoint} CS</dt><dd>+1</dd><dt>${P.bigGameKA}+ kills & assists</dt><dd>${sign(P.bigGameBonus)}</dd><dt>Team wins</dt><dd>${sign(P.win)}</dd></dl></div>
-        <div class="panel"><h2>Team</h2><dl>
-          <dt>Win</dt><dd>${sign(T.win)}</dd><dt>Tower</dt><dd>${sign(T.tower)}</dd><dt>Dragon</dt><dd>${sign(T.dragon)}</dd>
-          <dt>Baron</dt><dd>${sign(T.baron)}</dd><dt>First blood</dt><dd>${sign(T.firstBlood)}</dd><dt>Win under ${T.fastWinMinutes} min</dt><dd>${sign(T.fastWinBonus)}</dd></dl></div>
+        <div class="panel"><h2>Players (per series)</h2>${dl(g.playerRules, g.playerBonuses)}</div>
+        <div class="panel"><h2>Team (per series)</h2>${dl(g.teamRules, g.teamBonuses)}</div>
       </div>
     </div>`;
+  wireGameTabs();
 }
 
 // ---------- router ----------
@@ -448,6 +528,7 @@ if (MODE === 'browser') {
 
 window.addEventListener('hashchange', route_);
 (async () => {
-  [state.rules] = await Promise.all([api('/rules'), refreshMe()]);
+  await Promise.all([refreshGames(), refreshMe()]);
+  if (!gameById(state.game)) setGame(state.games[0].id);
   route_();
 })();

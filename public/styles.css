@@ -163,3 +163,24 @@ tr.cant td:not(:last-child) { opacity: .6; }
   .demo-note { padding: 0 16px; }
   .hero { padding: 24px; }
 }
+
+/* Games */
+.game-badge { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 4px; color: var(--gc); background: color-mix(in srgb, var(--gc) 16%, transparent); border: 1px solid color-mix(in srgb, var(--gc) 40%, transparent); }
+.game-tabs { display: flex; gap: 4px; padding: 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+.game-tabs button { border: none; background: transparent; color: var(--muted); padding: 6px 12px; font-size: 14px; }
+.game-tabs button.active { background: var(--panel-2); color: var(--text); box-shadow: inset 0 -2px 0 var(--gc); }
+.game-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; margin-top: 20px; }
+.game-card { display: grid; gap: 6px; padding: 14px 16px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--gc); }
+.seg { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg label { margin: 0; cursor: pointer; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg span { display: inline-block; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); font-weight: 600; font-size: 14px; }
+.seg input:checked + span { color: var(--text); border-color: var(--gc); background: color-mix(in srgb, var(--gc) 14%, transparent); }
+.seg input:focus-visible + span { outline: 2px solid var(--accent); }
+.role.CPT { color: #fbbf24; }
+.slot.captain { border-color: rgba(251,191,36,.35); }
+.slot.captain.filled { background: linear-gradient(90deg, rgba(251,191,36,.08), var(--panel-2)); }
+.slot-actions { display: flex; align-items: center; }
+.slot .x.cpt { font-family: var(--mono); font-size: 12px; font-weight: 700; border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; margin-right: 2px; }
+.slot .x.cpt:hover { color: #fbbf24; border-color: #fbbf24; }
+.row.spread > .game-tabs { margin-bottom: 12px; }

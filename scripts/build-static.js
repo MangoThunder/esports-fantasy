@@ -15,7 +15,8 @@ fs.rmSync(out, { recursive: true, force: true });
 copy('public', '.');
 
 // Shared server code, unchanged.
-for (const f of ['routes.js', 'scoring.js', 'seed.js', 'sim.js', 'schema.js']) copy(`server/${f}`, `engine/${f}`);
+for (const f of ['routes.js', 'seed.js', 'sim.js', 'schema.js']) copy(`server/${f}`, `engine/${f}`);
+copy('server/games', 'engine/games');
 // Browser stand-ins for the Node-only pieces.
 copy('web/db.js', 'engine/db.js');
 copy('web/crypto.js', 'engine/crypto.js');
