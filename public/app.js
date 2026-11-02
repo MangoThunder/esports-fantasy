@@ -1,4 +1,6 @@
 // Fragline Fantasy — single-page frontend (no build step).
+import { request, MODE, resetData } from './transport.js';
+
 const $ = (sel, el = document) => el.querySelector(sel);
 const app = $('#app');
 
@@ -7,13 +9,8 @@ const money = (n) => '$' + Number(n).toLocaleString();
 const fmt = (n, d = 1) => Number(n).toFixed(d);
 
 async function api(path, opts = {}) {
-  const res = await fetch('/api' + path, {
-    method: opts.method || 'GET',
-    headers: opts.body ? { 'Content-Type': 'application/json' } : {},
-    body: opts.body ? JSON.stringify(opts.body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  const { status, data } = await request(opts.method || 'GET', path, opts.body);
+  if (status >= 400) throw new Error(data.error || `Request failed (${status})`);
   return data;
 }
 
@@ -58,7 +55,11 @@ function renderHeader() {
        <span class="muted">${esc(user.username)}</span>
        <button class="small ghost" id="logout">Log out</button>`
     : '';
-  $('#logout')?.addEventListener('click', async () => { await api('/logout', { method: 'POST' }); location.hash = '#/'; await refreshMe(); route_(); });
+  $('#logout')?.addEventListener('click', async () => {
+    await api('/logout', { method: 'POST' });
+    state.me.user = null; // update before navigating so no view renders as the old user
+    if (location.hash.replace(/^#\/?/, '')) location.hash = '#/'; else route_();
+  });
   $('#sim')?.addEventListener('click', async (e) => {
     e.target.disabled = true;
     try {
@@ -415,7 +416,9 @@ function viewRules() {
 }
 
 // ---------- router ----------
+let navId = 0;
 async function route_() {
+  const thisNav = ++navId;
   window.onbeforeunload = null;
   $('#modal').classList.add('hidden');
   const parts = location.hash.replace(/^#\/?/, '').split('/');
@@ -429,8 +432,18 @@ async function route_() {
     if (parts[0] === 'schedule') return await viewSchedule();
     return await viewHome();
   } catch (err) {
+    if (thisNav !== navId) return; // a newer page has replaced this one
     app.innerHTML = `<div class="panel"><h2>Couldn't load this page</h2><p class="muted">${esc(err.message)}</p><a href="#/">Back to leagues</a></div>`;
   }
+}
+
+if (MODE === 'browser') {
+  const f = document.createElement('footer');
+  f.className = 'demo-note';
+  f.innerHTML = 'Demo mode: everything is saved in this browser only, so leagues can\'t be shared with other devices. ' +
+    'Sign up a second account to try joining a league. <button class="small ghost" id="reset">Reset demo data</button>';
+  document.body.appendChild(f);
+  $('#reset').addEventListener('click', () => { if (confirm('Delete all accounts, leagues and results in this browser?')) resetData(); });
 }
 
 window.addEventListener('hashchange', route_);

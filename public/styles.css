@@ -154,8 +154,12 @@ tr.cant td:not(:last-child) { opacity: .6; }
 .rules dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
 .rules dt { color: var(--muted); } .rules dd { margin: 0; font-family: var(--mono); text-align: right; }
 
+.demo-note { max-width: 1200px; margin: -40px auto 40px; padding: 0 24px; color: var(--muted); font-size: 13px; }
+.demo-note button { margin-left: 6px; }
+
 @media (max-width: 600px) {
   .topbar { padding: 10px 16px; gap: 10px; }
   main { padding: 20px 16px 60px; }
+  .demo-note { padding: 0 16px; }
   .hero { padding: 24px; }
 }

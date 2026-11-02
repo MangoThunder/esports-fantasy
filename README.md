@@ -12,6 +12,12 @@ npm start          # http://localhost:3000
 npm run reset      # wipe the database and start fresh
 ```
 
+### GitHub Pages version
+
+GitHub Pages only hosts static files, so it can't run the Node server. `npm run build:static` builds a version into `dist/` that runs the same API code in the browser instead, using SQLite compiled to WebAssembly (sql.js) and saving to `localStorage`. It's a working demo, but each visitor's data stays in their own browser, so friends can't join each other's leagues. Shared leagues need the Node server hosted somewhere (Render, Railway, Fly.io and so on).
+
+`.github/workflows/pages.yml` rebuilds and deploys the page on every push to `main`. To set it up, open the repo's **Settings → Pages** and set **Source** to **GitHub Actions**.
+
 To try it out: sign up, create a league, share the invite code (or open a private window and join as a second user), set a lineup, then click **▶ Play week** in the header to simulate that week's matches.
 
 ## How the game works
@@ -26,12 +32,15 @@ To try it out: sign up, create a league, share the invite code (or open a privat
 
 | File | What it does |
 |---|---|
-| `server/index.js` | Express API: auth (scrypt + session cookie), leagues, lineups, stats |
-| `server/db.js` | SQLite schema |
+| `server/routes.js` | The whole API (auth, leagues, lineups, stats) with no framework, shared by both versions |
+| `server/index.js` | Express wrapper around `routes.js`, plus session cookies |
+| `server/db.js`, `server/schema.js` | SQLite database (Node) and schema |
 | `server/scoring.js` | Scoring rules and salary cap, all in one place |
 | `server/seed.js` | 8 made-up teams, 40 players, a 7-week round-robin |
 | `server/sim.js` | Match simulator that stands in for a real stats feed |
 | `public/` | Frontend: plain JS single-page app, no build step |
+| `web/` | Browser replacements for `db.js`, `crypto.js` and `transport.js`, used in the Pages build |
+| `scripts/build-static.js` | Builds the GitHub Pages site into `dist/` |
 
 ## Moving to real esports data
 
